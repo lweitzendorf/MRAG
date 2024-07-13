@@ -14,8 +14,8 @@ import random
 import itertools
 
 from tqdm import tqdm
-from typing import Any, Optional
 from dataclasses import dataclass
+from typing import Any, Optional, Union
 from multiprocessing.pool import ThreadPool
 
 from wikipediaapi import WikipediaPage, Wikipedia
@@ -48,24 +48,46 @@ class CategoryConfig:
 
 
 @dataclass(frozen=True)
-class Article:
+class _BaseArticle:
     """
-    Data class to represent the different aspects of a Wikipedia article.
-
-    title represents the title of the article.
-    text contains the summary, the first section, of an article.
-    label states the category to which the article belongs to.
+    Internal data class to handle retrieved articles before they are assigned an ID.
+    See :class:`Article` for more information.
     """
     title: str
-    text: str
     label: str
-
-    @classmethod
-    def from_dict(cls, article: dict[str, str]) -> 'Article':
-        return cls(**article)
+    document: str
 
     def __repr__(self):
         return f'<Article {self.title}>'
+
+
+@dataclass(frozen=True)
+class Article(_BaseArticle):
+    """
+    Data class to represent the different aspects of a Wikipedia article.
+
+    id is a unique number representing the article
+    title represents the title of the article.
+    document contains the summary, the first section, of an article.
+    label states the category to which the article belongs to.
+    """
+    id: int
+
+    @classmethod
+    def from_dict(cls, article: dict[str, Union[int, str]]) -> 'Article':
+        return cls(**article)
+
+
+class ArticleEncoder(json.JSONEncoder):
+    """
+    Class to convert Articles into JSON format.
+    """
+    def default(self, o: object) -> Any:
+        if isinstance(o, Article):
+            # place ID on top
+            attr_dict = o.__dict__.copy()
+            return {"id": attr_dict.pop("id")} | attr_dict
+        return super().default(o)
 
 
 class MultiRagWiki(Wikipedia):
@@ -138,7 +160,7 @@ def _fetch_articles_for_group(
         min_length: int,
         pbar: tqdm = None,
         retries: int = 3
-) -> set[Article]:
+) -> set[_BaseArticle]:
     """
     For a given category, retrieve a random set of `sample_size` articles matching
     the criteria specified in `config` and a minimum length of `min_length`.
@@ -156,7 +178,7 @@ def _fetch_articles_for_group(
     :param retries: Maximum number of retries after encountering :exception:`HTTPError`. Defaults to 3.
     :type retries: int
     :return: Set of articles referenced from `pages` matching the criteria.
-    :rtype: set[Article]
+    :rtype: set[_BaseArticle]
     """
     if sample_size < 1:
         return set()
@@ -168,7 +190,7 @@ def _fetch_articles_for_group(
                 candidates.append(linked_page)
 
     random.shuffle(candidates)
-    selected: set[Article] = set()
+    selected: set[_BaseArticle] = set()
 
     for linked_page in candidates:
         rem_retries = retries
@@ -186,13 +208,13 @@ def _fetch_articles_for_group(
             # doesn't fit matching criteria for this group
             continue
 
-        article = Article(linked_page.title, linked_page.summary, config.label)
+        article = _BaseArticle(linked_page.title, config.label, linked_page.summary)
         if article in selected:
             # duplicate of previous article
             continue
 
         if pbar is not None:
-            pbar.update(1)
+            pbar.update()
 
         selected.add(article)
         if len(selected) == sample_size:
@@ -228,7 +250,8 @@ def fetch_articles(
         config_dicts: list[dict[str, Any]] = json.load(file)
 
     if num_categories > len(config_dicts):
-        raise Exception(f"Config file {config_path} only contains {len(config_dicts)} categories, but {num_categories} were requested")
+        raise Exception(f"Config file {config_path} only contains {len(config_dicts)} "
+                        f"categories, but {num_categories} were requested")
     config_dicts = config_dicts[:num_categories]
 
     wiki: Wikipedia = MultiRagWiki()
@@ -243,24 +266,27 @@ def fetch_articles(
     print(f"Retrieving {samples_per_category} samples for {num_groups} groups...")
     pbar = tqdm(total=num_groups * samples_per_category)
 
-    def fetch_routine(_config: CategoryConfig) -> set[Article]:
+    def fetch_routine(_config: CategoryConfig) -> set[_BaseArticle]:
         pages: list[WikipediaPage] = group_pages[_config]
         return _fetch_articles_for_group(pages, _config, samples_per_category, min_article_length, pbar)
 
     with ThreadPool() as pool:
         configs: list[CategoryConfig] = list(group_pages.keys())
-        articles: list[set[Article]] = pool.map(fetch_routine, configs)
+        articles: list[set[_BaseArticle]] = pool.map(fetch_routine, configs)
 
-    all_articles: list[Article] = list(itertools.chain(*articles))
+    all_articles: list[Article] = []
+    for i, base_article in enumerate(itertools.chain(*articles)):
+        article = Article(id=i, **base_article.__dict__)
+        all_articles.append(article)
+
     if export_path is None:
         return all_articles
 
-    print(f"Saving data in {export_path}...")
-
+    print(f"Saving data to {export_path}...")
     if export_dir := os.path.dirname(export_path):
         # os.makedirs does not like an empty path
         os.makedirs(export_dir, exist_ok=True)
-    with open(export_path, 'w',) as file:
-        json.dump(all_articles, file, indent=4, default=lambda o: o.__dict__)
+    with open(export_path, 'w') as file:
+        json.dump(all_articles, file, indent=4, cls=ArticleEncoder)
 
     return all_articles

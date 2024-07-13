@@ -1,7 +1,8 @@
 from .generate_data import (
     Article,
     fetch_articles,
-    load_articles
+    load_articles,
+    ArticleEncoder
 )
 from .generate_queries import (
     Query,

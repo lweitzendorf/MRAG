@@ -56,20 +56,21 @@ The `explicit_category` attribute helps with the scraping of Wikipedia articles.
 ```JSON
 [
     {
+        "id": 0,
         "title": "...",
-        "text": "...",
-        "label": "..."
+        "label": "...",
+        "document": "..."
     },
 ]
 ```
 
 Each document in the output file of the synthetic dataset has three attributes: `title`, `text` and `label`.
 The `title` attribute reflects the title of the respective Wikipedia article.
-`text` contains the summary, the first section, of the Wikipedia articles and serves as the document during the following stages of the pipeline.
+`document` contains the summary, the first section, of the Wikipedia articles and serves as the document during the following stages of the pipeline.
 The value of that attribute contains at least the minimum number of characters, that were specified during the synthetic dataset generation (default: 800).
 `label` specifies the category to which that `document` belongs to.
 
-The `text` attribute is used during the subsequent embedding stage, while all three attributes are used during the query generation for the synthetic dataset.
+The `document` attribute is used during the subsequent embedding stage, while all three attributes are used during the query generation for the synthetic dataset.
 
 
 ## Synthetic Query Generation
@@ -126,14 +127,15 @@ Each question is separately applied through an embedding model.
 ```
 [
     {
-        "topics": ["...", "..." ...],
-        "text: "...",
-        "fusion": ["...", "...", ...]
+        "id": 0
+        "query: "...",
+        "fusion_query": ["...", "...", ...]
+        "topics": [0, 1, 2, ...],
     }
 ]
 ```
-Each query has at least two attributes: `topics` and `text`.
-The `text` attribute contains the actual query text.
+Each query has at least two attributes: `topics` and `query`.
+The `query` attribute contains the actual query text.
 `topics` contains the article titles that were used during the generation of the query.
 `topics` is used during the evaluation to check, whether all necessary articles were fetched.
 The attribute `fusion` is used only for fusion queries and contains the prompts, which are used to query an LLM to improve the results.

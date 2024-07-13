@@ -21,6 +21,7 @@ from transformers import AutoTokenizer, AutoModel
 from multirag.dataset import (
     Article,
     load_articles,
+    ArticleEncoder,
     Query,
     FusionQuery,
     QueryEncoder,
@@ -142,7 +143,8 @@ class EmbeddingModel:
         self._tokenizer = AutoTokenizer.from_pretrained("Salesforce/SFR-Embedding-Mistral")
         self._model = AutoModel.from_pretrained(
             "Salesforce/SFR-Embedding-Mistral",
-            device_map=device
+            device_map=device,
+            torch_dtype=torch.float16 if (device == "cuda") else torch.float32,
         )
         self.target_layers = target_layers or {len(self._model.layers) - 1}
 
@@ -267,7 +269,7 @@ class EmbeddingEncoder(json.JSONEncoder):
         """
         if isinstance(o, ArticleEmbeddings):
             return {
-                "article": o.article.__dict__,
+                "article": ArticleEncoder().default(o),
                 "embeddings": self.default(o.embeddings)
             }
         elif isinstance(o, FullEmbeddings):
@@ -317,26 +319,27 @@ def _load_embeddings(
         article_embeddings.append(article_emb)
 
     if articles:
-        articles_by_title = {a.title: a for a in articles}
+        articles_by_id = {a.id: a for a in articles}
     else:
-        articles_by_title = {e.article.title: e.article for e in article_embeddings}
+        articles_by_id = {e.article.id: e.article for e in article_embeddings}
 
     for query_emb_dict in json_data["queries"]:
         try:
             query_dict = query_emb_dict["query"]
-            topics: set[Article] = {articles_by_title[title] for title in query_dict["topics"]}
+            topics: set[Article] = {articles_by_id[qid] for qid in query_dict["topics"]}
         except KeyError:
             continue
 
+        query_id: int = query_dict["id"]
         text: str = query_dict["text"]
         default_emb: FullEmbeddings = FullEmbeddings.from_dict(query_emb_dict["embeddings"])
 
-        if "fusion" in query_dict:
-            query = FusionQuery(topics, text, query_dict["fusion"])
+        if "fusion_query" in query_dict:
+            query = FusionQuery(id=query_id, topics=topics, text=text, fusion_prompts=query_dict["fusion_query"])
             fusion_emb = [FullEmbeddings.from_dict(d) for d in query_emb_dict["fusion_embeddings"]]
             query_emb = FusionQueryEmbeddings(query, default_emb, fusion_emb)
         else:
-            query = Query(topics, text)
+            query = Query(id=query_id, topics=topics, text=text)
             query_emb = QueryEmbeddings(query, default_emb)
 
         query_embeddings.append(query_emb)

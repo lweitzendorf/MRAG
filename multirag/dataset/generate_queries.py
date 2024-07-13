@@ -23,17 +23,26 @@ from multirag.dataset import Article, load_articles
 
 
 @dataclass(frozen=True)
-class Query:
+class _BaseQuery:
     """
-    Data class to represent the different aspects of a query.
-
-    Each query has a set of Articles associated with it as well as the query itself in the member text.
+    Internal data class to handle retrieved articles before they are assigned an ID.
+    See :class:`Query` for more information.
     """
     topics: set[Article]
     text: str
 
     def __hash__(self):
         return hash(self.text)
+
+
+@dataclass(frozen=True)
+class Query(_BaseQuery):
+    """
+    Data class to represent the different aspects of a query.
+
+    Each query has a set of Articles associated with it as well as the query itself in the member text.
+    """
+    id: int
 
 
 @dataclass(frozen=True)
@@ -51,19 +60,21 @@ class FusionQuery(Query):
 
 class QueryEncoder(json.JSONEncoder):
     """
-    Class to handle the combination of FusionQueries and Queries.
+    Class to convert Queries and FusionQueries into JSON format.
     """
     def default(self, o: object) -> Any:
         if isinstance(o, FusionQuery):
             return {
-                "topics": [a.title for a in o.topics],
-                "text": o.text,
-                "fusion": o.fusion_prompts,
+                "id": o.id,
+                "query": o.text,
+                "fusion_query": o.fusion_prompts,
+                "topics": [a.id for a in o.topics]
             }
         elif isinstance(o, Query):
             return {
-                "topics": [a.title for a in o.topics],
-                "text": o.text,
+                "id": o.id,
+                "query": o.text,
+                "topics": [a.id for a in o.topics]
             }
         return super().default(o)
 
@@ -72,7 +83,7 @@ class QueryGenerator:
     """
     Class that uses the OpenAI API to generate the queries.
 
-    It supports GPT-3.5-Turo, GPT-4, GPT-4-Turbo and GPT-4o.
+    It supports GPT-3.5-Turbo, GPT-4, GPT-4-Turbo and GPT-4o.
     """
     class Model(Enum):
         GPT_3_5_TURBO = "gpt-3.5-turbo"
@@ -117,19 +128,19 @@ class QueryGenerator:
             articles += (
                 "---------\n" +
                 f"{article.title}:\n" +  # article title
-                article.text + '\n'  # article body
+                article.document + '\n'  # article body
             )
 
         return setup + articles + postfix
 
-    def query_from_topics(self, topics: set[Article]) -> Query:
+    def query_from_topics(self, topics: set[Article]) -> _BaseQuery:
         """
         Generate a synthetic query via the OpenAI API.
 
         :param topics: Articles to be used in the query.
         :type topics: set[Article]
         :return: Synthetic query for the synthetic dataset.
-        :rtype: Query
+        :rtype: _BaseQuery
         """
         response = self._openai_client.chat.completions.create(
             model=self.model.value,
@@ -147,7 +158,7 @@ class QueryGenerator:
                 }
             ]
         ).choices[0].message.content.strip()
-        return Query(topics, response)
+        return _BaseQuery(topics=topics, text=response)
 
     def fusion_from_query(self, query: Query, num_queries: int) -> FusionQuery:
         """
@@ -180,7 +191,7 @@ class QueryGenerator:
                 }
             ]
         ).choices[0].message.content.strip()
-        return FusionQuery(query.topics, query.text, response.split('\n'))
+        return FusionQuery(id=query.id, topics=query.topics, text=query.text, fusion_prompts=response.split('\n'))
 
 
 def _sample_query_topics(articles: list[Article], k: int, n: int) -> list[set[Article]]:
@@ -232,26 +243,27 @@ def load_queries(file_path: str, articles: list[Article]) -> list[Query]:
         json_data = json.load(file)
 
     queries: list[Query] = []
-    articles_by_title = {a.title: a for a in articles}
+    articles_by_id = {a.id: a for a in articles}
 
     for query_dict in json_data:
         try:
-            topics = {articles_by_title[title] for title in query_dict["topics"]}
+            topics = {articles_by_id[aid] for aid in query_dict["topics"]}
         except KeyError:
             continue
 
-        text = query_dict["text"]
-        if fusion := query_dict.get("fusion", None):
-            query = FusionQuery(topics, text, fusion)
+        qid = query_dict["id"]
+        text = query_dict["query"]
+        if fusion := query_dict.get("fusion_query"):
+            query = FusionQuery(id=qid, topics=topics, text=text, fusion_prompts=fusion)
         else:
-            query = Query(topics, text)
+            query = Query(id=qid, topics=topics, text=text)
 
         queries.append(query)
 
     return queries
 
 
-def _check_query(query: Query) -> bool:
+def _check_query(query: _BaseQuery) -> bool:
     """
     Check whether the queries adhere to certain constraints.
     - query should be at least 100 characters
@@ -349,9 +361,11 @@ def _review_queries(
             if choice == 'a':
                 break
             elif choice == 'r':
-                query = default_generator.query_from_topics(query.topics)
+                base_query = default_generator.query_from_topics(query.topics)
+                query = Query(id=query.id, **base_query.__dict__)
             elif choice == 'o':
-                query = advanced_generator.query_from_topics(query.topics)
+                base_query = advanced_generator.query_from_topics(query.topics)
+                query = Query(id=query.id, **base_query.__dict__)
             elif choice == 'c':
                 return queries
 
@@ -406,7 +420,7 @@ def generate_queries(
     try:
         queries: list[Query] = load_queries(export_path, articles)
     except (FileNotFoundError, json.JSONDecodeError):
-        queries = []
+        queries: list[Query] = []
 
     if queries:
         choice = input(f"Found {len(queries)} existing usable queries. Do you want to replace them? [y/N] ")
@@ -419,7 +433,7 @@ def generate_queries(
         if existing_queries < num_queries:
             missing_queries[k] = num_queries - existing_queries
 
-    def generate_single(_topics: set[Article]) -> Query:
+    def generate_single(_topics: set[Article]) -> _BaseQuery:
         _query = None
         for _ in range(num_attempts):
             _query = generator.query_from_topics(_topics)
@@ -428,15 +442,17 @@ def generate_queries(
         return _query
 
     if missing_queries:
+        next_id = max(q.id for q in queries) + 1 if queries else 0
         pbar = tqdm(total=sum(missing_queries.values()), desc="Generating queries")
         for k, n in missing_queries.items():
             for topics in _sample_query_topics(articles, k, n):
                 query = generate_single(topics)
-                queries.append(query)
+                queries.append(Query(id=next_id, **query.__dict__))
+                next_id += 1
                 _save_to_file(queries, export_path)
-                pbar.update(1)
+                pbar.update()
     else:
-        print(f"No new queries were added.")
+        print("No new queries were added.")
 
     if manual_review:
         print("Reviewing generated queries...")

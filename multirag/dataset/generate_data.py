@@ -10,10 +10,12 @@
 
 import json
 import os
+import sys
 import random
 import itertools
 
 from tqdm import tqdm
+from retry import retry
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 from multiprocessing.pool import ThreadPool
@@ -192,23 +194,30 @@ def _fetch_articles_for_group(
     random.shuffle(candidates)
     selected: set[_BaseArticle] = set()
 
-    for linked_page in candidates:
-        rem_retries = retries
-        is_match = False
-
-        while rem_retries > 0:
-            try:
-                is_match = _match_page(linked_page, config)
-                is_match &= len(linked_page.summary) >= min_length
-                rem_retries = 0
-            except (ReadTimeout, ConnectionError, JSONDecodeError):
-                rem_retries -= 1
-
-        if not is_match:
+    @retry(tries=retries, delay=1)
+    def get_article(_page: WikipediaPage) -> [_BaseArticle]:
+        if not _match_page(_page, config):
             # doesn't fit matching criteria for this group
+            return None
+
+        _article = _BaseArticle(_page.title, config.label, _page.summary)
+        if len(_article.document) < min_length:
+            # article text too short
+            return None
+
+        return _article
+
+    for linked_page in candidates:
+        try:
+            article = get_article(linked_page)
+        except (ReadTimeout, ConnectionError, JSONDecodeError):
+            # failed to fetch article
             continue
 
-        article = _BaseArticle(linked_page.title, config.label, linked_page.summary)
+        if article is None:
+            # didn't meet meet matching criteria
+            continue
+
         if article in selected:
             # duplicate of previous article
             continue

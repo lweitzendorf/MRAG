@@ -202,7 +202,7 @@ def embed_articles(articles: list[Article], model: EmbeddingModel) -> list[Artic
     :rtype: list[ArticleEmbeddings]
     """
     for article in tqdm(articles, "Generating article embeddings"):
-        embeddings = model.generate_embeddings(article.text)
+        embeddings = model.generate_embeddings(article.document)
         article_embedding = ArticleEmbeddings(article, embeddings)
         yield article_embedding
 
@@ -269,7 +269,7 @@ class EmbeddingEncoder(json.JSONEncoder):
         """
         if isinstance(o, ArticleEmbeddings):
             return {
-                "article": ArticleEncoder().default(o),
+                "article": ArticleEncoder().default(o.article),
                 "embeddings": self.default(o.embeddings)
             }
         elif isinstance(o, FullEmbeddings):
